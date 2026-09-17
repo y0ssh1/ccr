@@ -207,6 +207,12 @@ def fzf(lines, prompt, header, extra_args=()):
     return r.stdout.rstrip("\n") if r.returncode == 0 else ""
 
 
+# macOS host: トークンが無く、キーチェーンがロックされていれば解除する（ログインパスワードを聞かれる）
+UNLOCK = ('if [ "$(uname -s)" = Darwin ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] '
+          '&& ! security show-keychain-info >/dev/null 2>&1; then '
+          'echo "ccr: キーチェーンを解除します（このホストのログインパスワード）" >&2; security unlock-keychain; fi; ')
+
+
 def launch(host, path, claude_args, opts, tmux_name):
     """host の path で claude を起動する（exec するので戻らない）"""
     if host == "local":
@@ -216,7 +222,7 @@ def launch(host, path, claude_args, opts, tmux_name):
             return
         os.chdir(cwd)
         os.execvp("claude", ["claude", *claude_args])
-    inner = f"cd {qpath(path)} && exec " + shlex.join(["claude", *claude_args])
+    inner = f"cd {qpath(path)} && {UNLOCK}exec " + shlex.join(["claude", *claude_args])
     if not opts["no_tmux"]:
         # tmux があればその中で起動（-A: 同名セッションがあれば attach）。無ければ直接起動
         name = re.sub(r"[^A-Za-z0-9_-]", "-", tmux_name)
@@ -360,6 +366,7 @@ def cmd_ls(pos, opts):
 PROBE = ('for c in python3 claude tmux; do printf "ccr:%s=%s\\n" "$c" "$(command -v $c)"; done; '
          'printf "ccr:pyok=%s\\n" "$(python3 -c \'import sys;print(int(sys.version_info>=(3,6)))\' 2>/dev/null)"; '
          'printf "ccr:auth=%s\\n" "$(claude auth status 2>/dev/null | grep -c \'"loggedIn": *true\')"; '
+         'printf "ccr:kclocked=%s\\n" "$([ "$(uname -s)" = Darwin ] && ! security show-keychain-info >/dev/null 2>&1 && echo 1)"; '
          'printf "ccr:sessions=%s\\n" "$(ls ~/.claude/projects/*/*.jsonl 2>/dev/null | wc -l | tr -d \' \')"')
 
 CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -399,7 +406,12 @@ def check_remote(h):
     else:
         add("fail", "claude", "not found in login shell PATH", f"ccr setup {h}")
     if kv.get("claude") and kv.get("auth", "0") == "0":
-        add("fail", "claude login", "未ログイン", f"ssh -t {h} claude auth login   # ユーザーが実行（ブラウザ認証）")
+        if kv.get("kclocked") == "1":
+            add("fail", "claude login", "ssh からはキーチェーンがロックされていて認証情報を読めない（起動時にパスワードで解除は可能）",
+                f"{h} 上で一度だけ: claude setup-token → トークンをコピーして (umask 077; pbpaste > ~/.claude/oauth-token)"
+                f"   # ユーザーが実行。読み込み設定は ccr setup {h} が .zshrc に追加")
+        else:
+            add("fail", "claude login", "未ログイン", f"ssh -t {h} claude auth login   # ユーザーが実行（ブラウザ認証）")
     if kv.get("tmux"):
         add("ok", "tmux", kv["tmux"])
     else:

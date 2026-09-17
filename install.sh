@@ -145,8 +145,24 @@ setup_host() {
     fi
   fi
 
+  # macOS は認証情報をキーチェーンに置くが、ssh セッションからはキーチェーンがロックされていて読めない。
+  # ~/.claude/oauth-token（claude setup-token で発行）があればそれを環境変数で渡す
+  if [ "$OS" = Darwin ]; then
+    for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+      [ "$rc" = "$HOME/.bashrc" ] && [ ! -f "$rc" ] && continue
+      if ! grep -q '# ccr: claude token' "$rc" 2>/dev/null; then
+        say "$rc に ~/.claude/oauth-token の読み込みを追加"
+        printf '\n[ -r "$HOME/.claude/oauth-token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude/oauth-token")"  # ccr: claude token\n' >> "$rc"
+      fi
+    done
+  fi
+
   if have claude && ! claude auth status 2>/dev/null | grep -q '"loggedIn": *true'; then
-    todo "claude が未ログインです。このホスト上で実行: claude auth login（client からなら ssh -t <host> claude auth login）"
+    if [ "$OS" = Darwin ] && [ -n "${SSH_CONNECTION:-}" ] && ! security show-keychain-info >/dev/null 2>&1; then
+      todo "ssh からはキーチェーンがロックされていて claude の認証情報を読めません。このホストで一度だけ: claude setup-token → 表示されたトークンをコピーして (umask 077; pbpaste > ~/.claude/oauth-token)"
+    else
+      todo "claude が未ログインです。このホスト上で実行: claude auth login（client からなら ssh -t <host> claude auth login）"
+    fi
   fi
 
   # sshd

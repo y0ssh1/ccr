@@ -80,7 +80,7 @@ git clone https://github.com/y0ssh1/ccr ~/src/ccr && ~/src/ccr/install.sh       
   1. tmux を導入する（brew / apt / dnf）。
   2. claude を導入する（`curl -fsSL https://claude.ai/install.sh | bash`）。
   3. ssh で入ったときのログインシェルから claude が見えなければ、`.zshrc` / `.bashrc` に PATH を追記する。
-  4. claude のログイン状態と sshd の起動状態を確認する。
+  4. claude のログイン状態と sshd の起動状態を確認する。macOS では、`~/.claude/oauth-token` を `CLAUDE_CODE_OAUTH_TOKEN` として読み込む設定を `.zshrc` に追加する（ssh 越しではキーチェーンを読めないため）。
   5. `--authorize-key` で渡された鍵を `authorized_keys` に登録する。
   6. 直接実行した場合は、client 側に書くべき `~/.ssh/config` のブロックを表示する（Tailscale があれば MagicDNS 名を使う）。
 - **client**
@@ -239,6 +239,7 @@ ccn devbox:~/x -n           # -n / --dry-run: 実行されるコマンドを表�
 | `Could not resolve` / `timed out` / `refused` | ホストに到達できない、または sshd が停止している | HostName と Tailscale の接続を確認する。macOS ならリモートログインをオンにする |
 | `python3` / `claude` / `tmux` が not found | host のセットアップが済んでいない | `ccr setup <host>`（macOS で python3 がない場合は、host で `xcode-select --install` の GUI 承認が必要） |
 | `claude login 未ログイン` | host の claude が未認証 | `ssh -t <host> claude auth login` |
+| `claude login ssh からはキーチェーンがロックされていて…` | macOS の host では、認証情報がキーチェーンにある。ssh セッションからはキーチェーンがロックされていて読めない | host で一度だけ `claude setup-token` を実行し、表示されたトークンをコピーして `(umask 077; pbpaste > ~/.claude/oauth-token)` で保存する。`ccr setup` が `.zshrc` に読み込み設定を追加済み。トークンがなくても、起動時に `security unlock-keychain` を実行してパスワードで解除する |
 | `ccr: tmux が無いため直接起動します` | host に tmux がない | `ccr setup <host>` |
 | resume 時に `cd: no such file or directory` | ディレクトリが削除・移動されている | ディレクトリを元の場所に戻す |
 | 一覧が開くまで遅い | ホストごとに毎回 ssh 接続している | `~/.ssh/config` に `ControlMaster auto` / `ControlPath ~/.ssh/cm-%r@%h:%p` / `ControlPersist 10m` を設定する |
