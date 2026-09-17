@@ -152,20 +152,21 @@ setup_host() {
 
   # macOS は認証情報をキーチェーンに置くが、ssh セッションからはキーチェーンがロックされていて読めない。
   # ~/.claude/oauth-token（claude setup-token で発行）があればそれを環境変数で渡す。
-  # ssh セッション限定にする: 長期トークンは推論専用で、ローカルの端末にまで効かせると
-  # claude auth login 済みでも Remote Control などが使えなくなる
+  # 渡すのはキーチェーンが読めないときだけ: 長期トークンは推論専用で、キーチェーンが読める端末にまで
+  # 効かせると claude auth login 済みでも Remote Control などが使えなくなる。
+  # $SSH_CONNECTION では判定しない（ssh から既存の tmux ペインに入ると引き継がれない）。ccr の UNLOCK と同じ判定
   if [ "$OS" = Darwin ]; then
     for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
       [ "$rc" = "$HOME/.bashrc" ] && [ ! -f "$rc" ] && continue
-      # 旧版が追加した無条件の読み込み行は取り除いて入れ直す
-      if grep '# ccr: claude token' "$rc" 2>/dev/null | grep -qv 'SSH_CONNECTION'; then
-        say "$rc の ~/.claude/oauth-token 読み込みを ssh セッション限定に更新"
+      # 旧版が追加した読み込み行（無条件 / SSH_CONNECTION 判定）は取り除いて入れ直す
+      if grep '# ccr: claude token' "$rc" 2>/dev/null | grep -qv 'show-keychain-info'; then
+        say "$rc の ~/.claude/oauth-token 読み込みを「キーチェーンが読めないときだけ」に更新"
         grep -v '# ccr: claude token' "$rc" > "$rc.ccr-tmp" && cat "$rc.ccr-tmp" > "$rc"
         rm -f "$rc.ccr-tmp"
       fi
       if ! grep -q '# ccr: claude token' "$rc" 2>/dev/null; then
-        say "$rc に ~/.claude/oauth-token の読み込みを追加（ssh セッションのみ）"
-        printf '\n[ -n "${SSH_CONNECTION:-}" ] && [ -r "$HOME/.claude/oauth-token" ] && export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude/oauth-token")"  # ccr: claude token\n' >> "$rc"
+        say "$rc に ~/.claude/oauth-token の読み込みを追加（キーチェーンが読めないときだけ）"
+        printf '\n[ -r "$HOME/.claude/oauth-token" ] && ! security show-keychain-info >/dev/null 2>&1 && export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.claude/oauth-token")"  # ccr: claude token\n' >> "$rc"
       fi
     done
   fi
@@ -212,7 +213,7 @@ setup_host() {
       esac
     fi
   fi
-  if [ -s "$token_file" ] && [ -n "${SSH_CONNECTION:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  if [ -s "$token_file" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && ! security show-keychain-info >/dev/null 2>&1; then
     CLAUDE_CODE_OAUTH_TOKEN=$(cat "$token_file"); export CLAUDE_CODE_OAUTH_TOKEN
   fi
 

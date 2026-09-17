@@ -81,7 +81,7 @@ git clone https://github.com/y0ssh1/ccr ~/src/ccr && ~/src/ccr/install.sh       
   1. tmux を導入する（brew / apt / dnf）。
   2. claude を導入する（`curl -fsSL https://claude.ai/install.sh | bash`）。
   3. ssh で入ったときのログインシェルから claude が見えなければ、`.zshrc` / `.bashrc` に PATH を追記する。
-  4. claude のログイン状態と sshd の起動状態を確認する。macOS では、`~/.claude/oauth-token` を `CLAUDE_CODE_OAUTH_TOKEN` として読み込む設定を `.zshrc` に追加する（ssh 越しではキーチェーンを読めないため）。読み込みは ssh セッション（`$SSH_CONNECTION` あり）のときだけ。長期トークンは推論専用なので、ローカルの端末では `claude auth login` の認証をそのまま使う（Remote Control などが使える）。
+  4. claude のログイン状態と sshd の起動状態を確認する。macOS では、`~/.claude/oauth-token` を `CLAUDE_CODE_OAUTH_TOKEN` として読み込む設定を `.zshrc` に追加する（ssh 越しではキーチェーンを読めないため）。読み込むのはキーチェーンが読めないとき（`security show-keychain-info` が失敗するとき）だけ。長期トークンは推論専用なので、キーチェーンが読めるローカルの端末では `claude auth login` の認証をそのまま使う（Remote Control などが使える）。
   5. `--authorize-key` で渡された鍵を `authorized_keys` に登録する。
   6. 直接実行した場合は、client 側に書くべき `~/.ssh/config` のブロックを表示する（Tailscale があれば MagicDNS 名を使う）。
 - **client**
