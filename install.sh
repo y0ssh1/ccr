@@ -175,7 +175,20 @@ setup_host() {
       todo "claude が無いためトークンを設定できません"
     else
       say "claude setup-token を実行します。完了後に表示されるトークン（sk-ant-...）をコピーしてください"
-      claude setup-token </dev/tty >/dev/tty 2>&1 || true
+      # macOS では /dev/tty を kqueue で監視できず claude(Bun) が EINVAL で落ちるため、
+      # 端末に直結している fd（curl | sh なら stdout/stderr）を stdin に回して実行する
+      if [ -t 0 ]; then
+        claude setup-token || st=$?
+      elif [ -t 2 ]; then
+        claude setup-token 0<&2 || st=$?
+      elif [ -t 1 ]; then
+        claude setup-token 0<&1 || st=$?
+      else
+        st=1
+      fi
+      if [ "${st:-0}" != 0 ]; then
+        warn "claude setup-token をここで実行できませんでした。別のターミナルタブで 'claude setup-token' を実行し、表示されたトークンをコピーしてください"
+      fi
       printf '%s' "コピーしたトークンを貼り付けて Enter（入力は表示されません）: " >/dev/tty
       stty -echo </dev/tty 2>/dev/null || true
       read -r tok </dev/tty || tok=""
