@@ -62,7 +62,7 @@ description: ccr / ccn（ローカルと ssh 先の複数マシンにまたが�
 | `ssh  Could not resolve / timed out / refused` | HostName と Tailscale の接続を確認する。リモートが macOS なら「システム設定 → 一般 → 共有 → リモートログイン」をオンにする | 確認はエージェント、設定変更はユーザー |
 | `python3` / `claude` / `tmux` の不足 | `ccr setup <alias>` | エージェント（macOS の python3 だけは、リモートで `xcode-select --install` の GUI 承認が必要） |
 | `claude login  未ログイン` | `ssh -t <alias> claude auth login` | ユーザー |
-| `claude login  ssh からはキーチェーンがロックされていて…`（macOS の host） | host で一度だけ `claude setup-token` を実行し、トークンをコピーして `(umask 077; pbpaste > ~/.claude/oauth-token)` で保存する。読み込み設定は `ccr setup` が `.zshrc` に追加する。トークンがなくても、起動時にキーチェーン解除のパスワードを聞かれるだけで使える | ユーザー |
+| `claude login  ssh からはキーチェーンがロックされていて…`（macOS の host） | host のターミナルで `curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh \| sh -s -- --role host --token` を実行する（ブラウザ認証 → トークンの貼り付け）。トークンがなくても、起動時にキーチェーン解除のパスワードを聞かれるだけで使える | ユーザー（host のターミナル。ssh 越しではブラウザが開かない） |
 | local の `sshd` / `tmux` の warn | このマシンを host として使わないなら無視してよい | - |
 
 3. 完了したら、ユーザーに次のコマンドを案内する。

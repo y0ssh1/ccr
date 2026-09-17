@@ -13,6 +13,8 @@
 #   --host <alias>          ~/.config/ccr/hosts に登録し、ssh 越しに host セットアップを実行（client 用）
 #   --no-remote             --host の ssh 越しセットアップをしない（登録だけ）
 #   --authorize-key <pub>   公開鍵文字列を ~/.ssh/authorized_keys に追加（host 用）
+#   --token                 claude setup-token を実行し、貼り付けたトークンを ~/.claude/oauth-token に保存（host 用。
+#                           macOS は ssh 越しにキーチェーンを読めないため必要。端末があり未設定なら自動で提案する）
 #   --no-skill              Claude Code skill を入れない
 #   --bin <dir>             ccr の配置先（既定 ~/.local/bin, 環境変数 CCR_BIN）
 #
@@ -29,6 +31,7 @@ HOSTS=""
 REMOTE=1
 SKILL=1
 AUTH_KEY=""
+TOKEN=auto
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -36,10 +39,12 @@ while [ $# -gt 0 ]; do
     --host) HOSTS="$HOSTS $2"; shift 2 ;;
     --no-remote) REMOTE=0; shift ;;
     --authorize-key) AUTH_KEY=$2; shift 2 ;;
+    --token) TOKEN=1; shift ;;
+    --no-token) TOKEN=0; shift ;;
     --no-skill) SKILL=0; shift ;;
     --bin) BIN=$2; shift 2 ;;
     -h|--help)
-      echo "usage: install.sh [--role client|host|both] [--host <alias>]... [--no-remote] [--authorize-key <pub>] [--no-skill] [--bin <dir>]"
+      echo "usage: install.sh [--role client|host|both] [--host <alias>]... [--no-remote] [--authorize-key <pub>] [--token|--no-token] [--no-skill] [--bin <dir>]"
       exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -157,9 +162,42 @@ setup_host() {
     done
   fi
 
+  token_file=$HOME/.claude/oauth-token
+  if [ "$TOKEN" = auto ] && [ "$OS" = Darwin ] && [ ! -s "$token_file" ] && [ "$TTY" = 1 ] && have claude; then
+    printf '%s' "ssh 越しに claude を使うための長期トークンを今設定しますか？（ブラウザ認証）[Y/n] " >/dev/tty
+    read -r ans </dev/tty || ans=n
+    case $ans in [nN]*) ;; *) TOKEN=1 ;; esac
+  fi
+  if [ "$TOKEN" = 1 ]; then
+    if [ "$TTY" != 1 ]; then
+      todo "--token は端末が必要です。このホストのターミナルで実行してください"
+    elif ! have claude; then
+      todo "claude が無いためトークンを設定できません"
+    else
+      say "claude setup-token を実行します。完了後に表示されるトークン（sk-ant-...）をコピーしてください"
+      claude setup-token </dev/tty >/dev/tty 2>&1 || true
+      printf '%s' "コピーしたトークンを貼り付けて Enter（入力は表示されません）: " >/dev/tty
+      stty -echo </dev/tty 2>/dev/null || true
+      read -r tok </dev/tty || tok=""
+      stty echo </dev/tty 2>/dev/null || true
+      printf '\n' >/dev/tty
+      tok=$(printf '%s' "$tok" | tr -d '[:space:]')
+      case $tok in
+        sk-ant-*)
+          mkdir -p "$HOME/.claude"
+          (umask 077; printf '%s\n' "$tok" > "$token_file")
+          say "トークンを保存: $token_file (600)" ;;
+        *) todo "トークンの形式が違います（sk-ant- で始まる文字列）。再実行: install.sh --role host --token" ;;
+      esac
+    fi
+  fi
+  if [ -s "$token_file" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    CLAUDE_CODE_OAUTH_TOKEN=$(cat "$token_file"); export CLAUDE_CODE_OAUTH_TOKEN
+  fi
+
   if have claude && ! claude auth status 2>/dev/null | grep -q '"loggedIn": *true'; then
     if [ "$OS" = Darwin ] && [ -n "${SSH_CONNECTION:-}" ] && ! security show-keychain-info >/dev/null 2>&1; then
-      todo "ssh からはキーチェーンがロックされていて claude の認証情報を読めません。このホストで一度だけ: claude setup-token → 表示されたトークンをコピーして (umask 077; pbpaste > ~/.claude/oauth-token)"
+      todo "ssh からはキーチェーンがロックされていて claude の認証情報を読めません。このホストのターミナルで: curl -fsSL $RAW/install.sh | sh -s -- --role host --token"
     else
       todo "claude が未ログインです。このホスト上で実行: claude auth login（client からなら ssh -t <host> claude auth login）"
     fi

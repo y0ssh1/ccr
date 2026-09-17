@@ -408,8 +408,8 @@ def check_remote(h):
     if kv.get("claude") and kv.get("auth", "0") == "0":
         if kv.get("kclocked") == "1":
             add("fail", "claude login", "ssh からはキーチェーンがロックされていて認証情報を読めない（起動時にパスワードで解除は可能）",
-                f"{h} 上で一度だけ: claude setup-token → トークンをコピーして (umask 077; pbpaste > ~/.claude/oauth-token)"
-                f"   # ユーザーが実行。読み込み設定は ccr setup {h} が .zshrc に追加")
+                f"{h} のターミナルで: curl -fsSL {INSTALL_URL} | sh -s -- --role host --token"
+                f"   # ユーザーが実行（ブラウザ認証 + トークン貼り付け）")
         else:
             add("fail", "claude login", "未ログイン", f"ssh -t {h} claude auth login   # ユーザーが実行（ブラウザ認証）")
     if kv.get("tmux"):

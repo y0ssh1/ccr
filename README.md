@@ -71,6 +71,7 @@ git clone https://github.com/y0ssh1/ccr ~/src/ccr && ~/src/ccr/install.sh       
 | `--host <alias>` | `~/.config/ccr/hosts` に登録し、ssh 越しに host セットアップを実行する（複数指定可） |
 | `--no-remote` | `--host` のホストは登録だけ行い、ssh 越しのセットアップはしない |
 | `--authorize-key "<pubkey>"` | 公開鍵を `~/.ssh/authorized_keys` に追加する（host 用） |
+| `--token` / `--no-token` | `claude setup-token` を実行し、貼り付けたトークンを `~/.claude/oauth-token`（600）に保存する（host 用）。macOS で端末から実行し、トークンが未設定なら自動で確認する |
 | `--no-skill` | Claude Code skill を配置しない |
 | `--bin <dir>` | `ccr` の配置先（既定は `~/.local/bin`。`CCR_BIN` でも指定可） |
 
@@ -239,7 +240,7 @@ ccn devbox:~/x -n           # -n / --dry-run: 実行されるコマンドを表�
 | `Could not resolve` / `timed out` / `refused` | ホストに到達できない、または sshd が停止している | HostName と Tailscale の接続を確認する。macOS ならリモートログインをオンにする |
 | `python3` / `claude` / `tmux` が not found | host のセットアップが済んでいない | `ccr setup <host>`（macOS で python3 がない場合は、host で `xcode-select --install` の GUI 承認が必要） |
 | `claude login 未ログイン` | host の claude が未認証 | `ssh -t <host> claude auth login` |
-| `claude login ssh からはキーチェーンがロックされていて…` | macOS の host では、認証情報がキーチェーンにある。ssh セッションからはキーチェーンがロックされていて読めない | host で一度だけ `claude setup-token` を実行し、表示されたトークンをコピーして `(umask 077; pbpaste > ~/.claude/oauth-token)` で保存する。`ccr setup` が `.zshrc` に読み込み設定を追加済み。トークンがなくても、起動時に `security unlock-keychain` を実行してパスワードで解除する |
+| `claude login ssh からはキーチェーンがロックされていて…` | macOS の host では、認証情報がキーチェーンにある。ssh セッションからはキーチェーンがロックされていて読めない | host のターミナルで `curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh \| sh -s -- --role host --token` を実行する（`claude setup-token` のブラウザ認証 → 表示されたトークンを貼り付けると `~/.claude/oauth-token` に保存される）。トークンがなくても、起動時に `security unlock-keychain` のパスワードを入力すれば使える |
 | `ccr: tmux が無いため直接起動します` | host に tmux がない | `ccr setup <host>` |
 | resume 時に `cd: no such file or directory` | ディレクトリが削除・移動されている | ディレクトリを元の場所に戻す |
 | 一覧が開くまで遅い | ホストごとに毎回 ssh 接続している | `~/.ssh/config` に `ControlMaster auto` / `ControlPath ~/.ssh/cm-%r@%h:%p` / `ControlPersist 10m` を設定する |
