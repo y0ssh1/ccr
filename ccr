@@ -471,7 +471,15 @@ def check_remote(h):
     def add(status, item, detail, fix=""):
         res.append({"host": h, "status": status, "item": item, "detail": detail, "fix": fix})
 
-    r = subprocess.run(["ssh", *SSH_OPTS, h, login_shell(PROBE)], capture_output=True, timeout=30)
+    try:
+        r = subprocess.run(["ssh", *SSH_OPTS, h, login_shell(PROBE)], capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=30)
+    except subprocess.TimeoutExpired:
+        # 典型例: .zprofile / .zshrc が ssh ログイン時に fzf や tmux attach などの対話コマンドを起動している
+        add("fail", "ssh", "ログインシェルが 30 秒以内に応答しない",
+            f"ssh {h} 'exec \"$SHELL\" -lxc true' で止まる行を確認し、対話コマンドを "
+            f"[ -z \"$ZSH_EXECUTION_STRING\" ] などで -c 起動時は実行しないようにする")
+        return res
     if r.returncode != 0 and b"ccr:" not in r.stdout:
         err = ssh_err(r.stderr)
         if "Host key verification failed" in err:
@@ -566,6 +574,23 @@ def cmd_doctor(pos, opts):
     sys.exit(1 if any(r["status"] == "fail" for r in res) else 0)
 
 
+def fetch(url):
+    """URL の中身を返す。python.org 版 Python など CA 証明書が未設定の環境では urllib が
+    CERTIFICATE_VERIFY_FAILED になるので、curl にフォールバックする"""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return r.read().decode()
+    except urllib.error.URLError as e:
+        if not shutil.which("curl"):
+            sys.exit(f"{url} を取得できません: {e.reason}")
+        r = subprocess.run(["curl", "-fsSL", "--max-time", "30", url], capture_output=True)
+        if r.returncode != 0:
+            sys.exit(f"{url} を取得できません: {e.reason} / curl: {r.stderr.decode(errors='replace').strip()}")
+        return r.stdout.decode()
+
+
 def cmd_setup(pos, opts):
     """ssh 越しに install.sh --role host を実行する（リモートに ccr の配置は不要）"""
     hosts = [h for h in pos if h != "local"]
@@ -576,9 +601,7 @@ def cmd_setup(pos, opts):
         with open(local) as f:
             script = f.read()
     else:
-        import urllib.request
-        with urllib.request.urlopen(INSTALL_URL, timeout=30) as r:
-            script = r.read().decode()
+        script = fetch(INSTALL_URL)
     # sh -c <script> install.sh ...: $0 が install.sh になり、clone 扱いされない
     remote = f"sh -c {shlex.quote(script)} install.sh --role host"
     failed = []
