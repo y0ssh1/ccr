@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 
 LIMIT = int(os.environ.get("CCR_LIMIT", "300"))
@@ -195,15 +196,76 @@ def oneline(s, n):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _cw(c):
+    return 2 if unicodedata.east_asian_width(c) in "WF" else 1
+
+
+def dwidth(s):
+    return sum(_cw(c) for c in s)
+
+
+def trunc(s, w):
+    """表示幅 w に収める（全角は幅 2）"""
+    s = " ".join(s.split())
+    if dwidth(s) <= w:
+        return s
+    out, cur = [], 0
+    for c in s:
+        if cur + _cw(c) > w - 1:
+            break
+        out.append(c)
+        cur += _cw(c)
+    return "".join(out) + "…"
+
+
+def pad(s, w):
+    return s + " " * max(0, w - dwidth(s))
+
+
+def term_width():
+    for fd in (2, 1, 0):
+        try:
+            return os.get_terminal_size(fd).columns
+        except OSError:
+            pass
+    return 80
+
+
+def short_path(path, home, w):
+    """~ 置換、worktree は repo⎇name に縮め、長ければ末尾側を残す"""
+    p = tilde(path, home)
+    m = re.match(r"^(.*?)/\.claude/worktrees/([^/]+)(.*)$", p) or re.match(r"^(.*?)/worktrees/([^/]+)(.*)$", p)
+    if m:
+        p = f"{os.path.basename(m.group(1)) or m.group(1)}⎇{m.group(2)}{m.group(3)}"
+    if dwidth(p) <= w:
+        return p
+    parts = p.split("/")
+    for i in range(1, len(parts)):
+        cand = "…/" + "/".join(parts[i:])
+        if dwidth(cand) <= w:
+            return cand
+    return trunc(parts[-1], w)
+
+
+RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
+HOST_COLORS = ["\033[35m", "\033[33m", "\033[32m", "\033[31m", "\033[34m"]
+
+
+def host_color(host, hosts):
+    if host == "local":
+        return "\033[36m"
+    return HOST_COLORS[hosts.index(host) % len(HOST_COLORS)] if host in hosts else HOST_COLORS[0]
+
+
 def tilde(path, home):
     return "~" + path[len(home):] if home and (path == home or path.startswith(home + "/")) else path
 
 
-def fzf(lines, prompt, header, extra_args=()):
+def fzf(lines, prompt, header, extra_args=(), sep="\n"):
     r = subprocess.run(
         ["fzf", "--delimiter", "\t", "--no-sort", "--layout", "reverse",
          "--prompt", prompt, "--header", header, *extra_args],
-        input="\n".join(lines), stdout=subprocess.PIPE, text=True)
+        input=sep.join(lines), stdout=subprocess.PIPE, text=True)
     return r.stdout.rstrip("\n") if r.returncode == 0 else ""
 
 
@@ -269,21 +331,48 @@ def cmd_resume(pos, opts, extra):
             sys.exit("セッションが見つかりません\n" + "\n".join(errors))
         tmp = tempfile.mkdtemp(prefix="ccr-")
         try:
-            hw = max(len(s["host"]) for s in sessions)
-            lines = []
+            width = term_width()
+            layout = os.environ.get("CCR_LAYOUT") or ("wide" if width >= 100 else "narrow")
+            hosts = sorted({s["host"] for s in sessions if s["host"] != "local"})
+            hw = max(dwidth(s["host"]) for s in sessions)
+            right_preview = layout == "wide" and width >= 150
+            # fzf のポインタ・スクロールバー分。右プレビュー時は一覧が 55% 幅になる
+            avail = (width * 55 // 100 if right_preview else width) - 5
+            items = []
             for i, s in enumerate(sessions):
                 p = os.path.join(tmp, f"{i}.json")
                 with open(p, "w") as f:
                     json.dump(s, f, ensure_ascii=False)
-                proj = tilde(s["cwd"], s["home"])
                 label = s["title"] or s["last"] or s["first"]
-                lines.append(f"{p}\t{s['host']:<{hw}}  {age(s['mtime']):>4}  "
-                             f"{oneline(proj, 40):<40}  {oneline(label, 90)}")
+                hc = host_color(s["host"], hosts)
+                ag = f"{age(s['mtime']):>4}"
+                if layout == "wide":
+                    pw = min(30, max(12, avail // 4))
+                    proj = short_path(s["cwd"], s["home"], pw)
+                    tw = max(10, avail - 4 - 1 - hw - 2 - pw - 2)
+                    row = (f"{DIM}{ag}{RESET} {hc}{pad(s['host'], hw)}{RESET}  "
+                           f"\033[34m{pad(proj, pw)}{RESET}  {trunc(label, tw)}")
+                else:
+                    meta_w = avail - 2 - dwidth(s["host"]) - 3 - dwidth(ag.strip()) - 3
+                    proj = short_path(s["cwd"], s["home"], max(8, meta_w))
+                    row = (f"{BOLD}{trunc(label, avail)}{RESET}\n"
+                           f"  {hc}{s['host']}{RESET}{DIM} · {ag.strip()} · {RESET}\033[34m{proj}{RESET}")
+                items.append(f"{p}\t{row}")
             me = shlex.quote(os.path.abspath(__file__))
-            out = fzf(lines, "resume> ", "\n".join(["host  age  project  title", *errors]),
-                      ["--with-nth", "2",
-                       "--preview", f"{shlex.quote(sys.executable)} {me} --preview {{1}}",
-                       "--preview-window", "down,40%,wrap"])
+            preview = f"{shlex.quote(sys.executable)} {me} --preview {{1}}"
+            if layout == "wide":
+                header = f"{DIM} age {pad('host', hw)}  project / title   ctrl-/: preview{RESET}"
+                pwin = "right,45%,wrap" if right_preview else "down,40%,wrap"
+                extra_fzf = []
+            else:
+                header = f"{DIM}enter: resume  ctrl-/: preview{RESET}"
+                pwin = "down,60%,wrap,hidden"
+                extra_fzf = ["--read0"]
+            out = fzf(items, "resume> ", "\n".join([header, *errors]),
+                      ["--with-nth", "2..", "--ansi", "--highlight-line", "--info", "inline-right",
+                       "--preview", preview, "--preview-window", pwin,
+                       "--bind", "ctrl-/:toggle-preview,alt-p:toggle-preview", *extra_fzf],
+                      sep="\0" if layout != "wide" else "\n")
             if not out:
                 return
             with open(out.split("\t", 1)[0]) as f:
@@ -326,11 +415,15 @@ def cmd_new(pos, opts, extra):
             rows.append((s["host"], s["cwd"]))
     if not rows:
         sys.exit("選べるホストがありません\n" + "\n".join(errors))
-    hw = max(len(h) for h, _ in rows)
-    lines = [f"{h}\t{p}\t{h:<{hw}}  {tilde(p, homes.get(h))}" for h, p in rows]
-    header = "\n".join(["Enter: そのホスト/ディレクトリで新規セッション",
-                        "一致なしで Enter: 入力を host:path（または /path）として使う", *errors])
-    out = fzf(lines, "new> ", header, ["--with-nth", "3", "--bind", "enter:accept-or-print-query"])
+    hw = max(dwidth(h) for h, _ in rows)
+    hosts_sorted = sorted({h for h, _ in rows if h != "local"})
+    pw = max(10, term_width() - 5 - hw - 2)
+    lines = [f"{h}\t{p}\t{host_color(h, hosts_sorted)}{pad(h, hw)}{RESET}  "
+             f"\033[34m{short_path(p, homes.get(h), pw)}{RESET}" for h, p in rows]
+    header = "\n".join([f"{DIM}enter: 新規開始 / 一致なし: host:path を直接指定{RESET}"
+                        if term_width() >= 60 else f"{DIM}enter: 新規 / host:path 入力可{RESET}", *errors])
+    out = fzf(lines, "new> ", header, ["--with-nth", "3", "--ansi", "--highlight-line",
+                                       "--bind", "enter:accept-or-print-query"])
     if not out:
         return
     if "\t" in out:

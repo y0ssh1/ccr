@@ -139,7 +139,17 @@ ccr --id 227ea544                     # ID の前方一致で直接 resume（fzf
 ccr -- --dangerously-skip-permissions # `--` 以降は claude にそのまま渡す
 ```
 
-fzf の操作: 文字を入力して絞り込み（host / project / title が対象）、Enter で resume、Esc で終了します。
+fzf の操作:
+
+- 文字を入力すると絞り込みます（host / project / title が対象）。
+- Enter で resume、Esc で終了します。
+- `ctrl-/`（または `alt-p`）でプレビューの表示を切り替えます。
+
+表示は端末の幅に合わせて変わります。`CCR_LAYOUT=wide|narrow` で固定することもできます。
+
+- **幅 100 未満（narrow）:** 1 件を 2 行で表示します（1 行目にタイトル、2 行目に `host · 経過時間 · project`）。プレビューは最初は隠れています。
+- **幅 100 以上（wide）:** `経過時間 host project title` の 1 行表示です。幅 150 以上ならプレビューを右側に出します。
+- **project の表記:** `~` に置き換えて表示します。worktree は `repo⎇name` のように縮め、長いパスは末尾側を残します。
 
 ### 新しいセッションを開始する（`ccn` / `ccr new`）
 
@@ -184,6 +194,7 @@ ccn devbox:~/x -n           # -n / --dry-run: 実行されるコマンドを表�
 | `~/.config/ccr/hosts` | なし | 1 行 1 ホスト。`#` 以降はコメント |
 | `CCR_HOSTS` | なし | 空白区切りのホスト一覧。hosts ファイルより優先される |
 | `CCR_LIMIT` | `300` | 1 ホストあたりに読むセッション数（新しい順） |
+| `CCR_LAYOUT` | 幅で自動判定 | `wide`（1 行表示）/ `narrow`（2 行表示）を固定する |
 
 ホスト指定の優先順位: コマンドライン引数 > `CCR_HOSTS` > `~/.config/ccr/hosts`
 
