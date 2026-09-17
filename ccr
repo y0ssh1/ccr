@@ -7,6 +7,7 @@
                                   target: host:path | host: (=home) | host | /path | ~/path | .
   ccr ls [host...] [--json]     セッション一覧を出力（非対話）
   ccr doctor [host...] [--json] ローカルと各ホストの依存関係を検査し、直し方を表示
+  ccr setup <host...>           ssh 越しにホスト側をセットアップ（install.sh --role host）
 
 options:
   --no-local       ローカルを対象から外す
@@ -24,15 +25,18 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 LIMIT = int(os.environ.get("CCR_LIMIT", "300"))
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
 HOSTS_FILE = os.path.expanduser("~/.config/ccr/hosts")
-INSTALL_URL = "https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh"
+RAW = os.environ.get("CCR_RAW", "https://raw.githubusercontent.com/y0ssh1/ccr/main")
+INSTALL_URL = f"{RAW}/install.sh"
 
 
 # ---------- scan (ローカルでもリモートでもこの部分が走る。python3.6+ / 標準ライブラリのみ) ----------
@@ -301,7 +305,7 @@ def cmd_new(pos, opts, extra):
     if pos:
         host, path = parse_target(pos[0], hosts)
     if host and path is not None:
-        return launch(host, path, extra, opts, f"ccn-{host}-{time.strftime('%H%M%S')}")
+        return new_session(host, path, extra, opts)
 
     # 対話: 過去セッションのディレクトリ + 各ホストの home から選ぶ
     targets = [host] if host else hosts
@@ -329,7 +333,15 @@ def cmd_new(pos, opts, extra):
         host, path = parse_target(out.strip(), hosts)
         if path is None:
             path = "~"
-    launch(host, path, extra, opts, f"ccn-{host}-{time.strftime('%H%M%S')}")
+    new_session(host, path, extra, opts)
+
+
+def new_session(host, path, extra, opts):
+    # ID を先に決めて tmux 名を resume 時（ccr-<id先頭8>）と揃える。後で ccr から選ぶと同じ tmux に attach される
+    if any(a == "--session-id" or a.startswith("--session-id=") for a in extra):
+        return launch(host, path, extra, opts, f"ccn-{host}-{time.strftime('%H%M%S')}")
+    sid = str(uuid.uuid4())
+    launch(host, path, ["--session-id", sid, *extra], opts, f"ccr-{sid[:8]}")
 
 
 def cmd_ls(pos, opts):
@@ -347,6 +359,7 @@ def cmd_ls(pos, opts):
 
 PROBE = ('for c in python3 claude tmux; do printf "ccr:%s=%s\\n" "$c" "$(command -v $c)"; done; '
          'printf "ccr:pyok=%s\\n" "$(python3 -c \'import sys;print(int(sys.version_info>=(3,6)))\' 2>/dev/null)"; '
+         'printf "ccr:auth=%s\\n" "$(claude auth status 2>/dev/null | grep -c \'"loggedIn": *true\')"; '
          'printf "ccr:sessions=%s\\n" "$(ls ~/.claude/projects/*/*.jsonl 2>/dev/null | wc -l | tr -d \' \')"')
 
 CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -380,20 +393,18 @@ def check_remote(h):
         add("ok", "python3", kv.get("python3", ""))
     else:
         add("fail", "python3", kv.get("python3") or "not found",
-            "macOS: xcode-select --install / Debian系: sudo apt-get install -y python3（リモートで実行）")
+            f"ccr setup {h}   # macOS は GUI 承認が必要: リモートで xcode-select --install")
     if kv.get("claude"):
         add("ok", "claude", kv["claude"])
     else:
-        add("fail", "claude", "not found in login shell PATH",
-            f"ssh -t {h} '{CLAUDE_INSTALL}'  # 導入済みなら .zshrc/.bashrc の PATH を確認")
+        add("fail", "claude", "not found in login shell PATH", f"ccr setup {h}")
+    if kv.get("claude") and kv.get("auth", "0") == "0":
+        add("fail", "claude login", "未ログイン", f"ssh -t {h} claude auth login   # ユーザーが実行（ブラウザ認証）")
     if kv.get("tmux"):
         add("ok", "tmux", kv["tmux"])
     else:
-        add("warn", "tmux", "not found（ssh が切れると claude も終了する）",
-            "macOS: brew install tmux / Debian系: sudo apt-get install -y tmux")
-    add("ok" if kv.get("sessions", "0") != "0" else "warn", "sessions",
-        f"{kv.get('sessions', '?')} files in ~/.claude/projects",
-        "" if kv.get("sessions", "0") != "0" else "リモートで一度 claude を使うと一覧に出る（ccn でも作れる）")
+        add("warn", "tmux", "not found（ssh が切れると claude も終了する）", f"ccr setup {h}")
+    add("ok", "sessions", f"{kv.get('sessions', '?')} files in ~/.claude/projects")
     return res
 
 
@@ -413,6 +424,20 @@ def cmd_doctor(pos, opts):
         p = shutil.which(c)
         add("ok" if p else "fail", f"{c} on PATH", p or "not found",
             "" if p else f"curl -fsSL {INSTALL_URL} | sh   # ~/.local/bin を PATH に追加")
+    # host として使われる場合の項目（このマシンに他から入らないなら warn は無視してよい）
+    if shutil.which("claude"):
+        r = subprocess.run(["claude", "auth", "status"], capture_output=True, text=True)
+        ok = bool(re.search(r'"loggedIn":\s*true', r.stdout))
+        add("ok" if ok else "fail", "claude login", "logged in" if ok else "未ログイン",
+            "" if ok else "claude auth login   # ユーザーが実行")
+    p = shutil.which("tmux")
+    add("ok" if p else "warn", "tmux", p or "not found（host として使うなら必要）", "" if p else f"{pkg} tmux")
+    try:
+        socket.create_connection(("127.0.0.1", 22), timeout=1).close()
+        add("ok", "sshd", "listening on :22")
+    except OSError:
+        add("warn", "sshd", "停止中（host として使うなら必要）",
+            "macOS: システム設定→一般→共有→リモートログイン / Linux: sudo systemctl enable --now ssh")
     skill = os.path.expanduser("~/.claude/skills/ccr/SKILL.md")
     add("ok" if os.path.exists(skill) else "warn", "claude skill", skill if os.path.exists(skill) else "not installed",
         "" if os.path.exists(skill) else f"curl -fsSL {INSTALL_URL} | sh")
@@ -434,6 +459,34 @@ def cmd_doctor(pos, opts):
             if r["fix"]:
                 print(f"{'':>{hw + 9}}fix: {r['fix']}")
     sys.exit(1 if any(r["status"] == "fail" for r in res) else 0)
+
+
+def cmd_setup(pos, opts):
+    """ssh 越しに install.sh --role host を実行する（リモートに ccr の配置は不要）"""
+    hosts = [h for h in pos if h != "local"]
+    if not hosts:
+        sys.exit("usage: ccr setup <host>...（このマシンは install.sh --role host）")
+    local = os.path.join(os.path.dirname(os.path.realpath(__file__)), "install.sh")
+    if os.path.exists(local):
+        with open(local) as f:
+            script = f.read()
+    else:
+        import urllib.request
+        with urllib.request.urlopen(INSTALL_URL, timeout=30) as r:
+            script = r.read().decode()
+    # sh -c <script> install.sh ...: $0 が install.sh になり、clone 扱いされない
+    remote = f"sh -c {shlex.quote(script)} install.sh --role host"
+    failed = []
+    for h in hosts:
+        cmd = ["ssh", *SSH_OPTS, "-t" if sys.stdin.isatty() else "-T", h, remote]
+        if opts["dry_run"]:
+            print(f"ssh {h} sh -c <install.sh> install.sh --role host")
+            continue
+        print(f"==> {h}: host setup", file=sys.stderr)
+        if subprocess.run(cmd).returncode != 0:
+            failed.append(h)
+    if failed:
+        sys.exit(f"setup failed: {' '.join(failed)}")
 
 
 def main():
@@ -474,7 +527,7 @@ def main():
 
     if os.path.basename(sys.argv[0]) == "ccn":
         cmd = "new"
-    elif pos[:1] and pos[0] in ("new", "ls", "doctor"):
+    elif pos[:1] and pos[0] in ("new", "ls", "doctor", "setup"):
         cmd = pos.pop(0)
     else:
         cmd = "resume"
@@ -484,6 +537,8 @@ def main():
         cmd_ls(pos, opts)
     elif cmd == "doctor":
         cmd_doctor(pos, opts)
+    elif cmd == "setup":
+        cmd_setup(pos, opts)
     else:
         cmd_resume(pos, opts, extra)
 
