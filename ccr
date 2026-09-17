@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""ccr - `claude -r` across local + ssh hosts.
+
+  ccr                  ローカル + 設定済みホストのセッションを fzf で選んで resume
+  ccr host1 host2      指定ホスト(+ローカル)だけ
+  ccr --no-local       リモートのみ
+  ccr --tmux           リモートを tmux セッション内で resume（切断しても生きる）
+  ccr -- <args>        claude -r に追加引数を渡す (例: -- --dangerously-skip-permissions)
+
+ホスト: $CCR_HOSTS (空白区切り) または ~/.config/ccr/hosts (1行1ホスト, # コメント可)
+ホスト名は ssh config の Host エイリアスでよい。リモート側には python3 と claude が必要。
+"""
+import concurrent.futures as cf
+import glob
+import json
+import os
+import shlex
+import subprocess
+import sys
+import shutil
+import tempfile
+import time
+
+LIMIT = int(os.environ.get("CCR_LIMIT", "300"))
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+
+
+# ---------- scan (ローカルでもリモートでもこの関数が走る) ----------
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                return b.get("text", "")
+    return ""
+
+
+def _is_real_prompt(o):
+    if o.get("type") != "user" or o.get("isMeta") or o.get("isSidechain"):
+        return False
+    c = (o.get("message") or {}).get("content")
+    if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+        return False
+    t = _text(c).strip()
+    return bool(t) and not t.startswith("<")
+
+
+def parse(path):
+    cwd = branch = first = None
+    title = ai_title = last = None
+    try:
+        mtime = os.path.getmtime(path)
+        with open(path, "rb") as fh:
+            for i, line in enumerate(fh):
+                if i > 300 or (cwd and first):
+                    break
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if not cwd and o.get("cwd"):
+                    cwd, branch = o["cwd"], o.get("gitBranch")
+                if not first and _is_real_prompt(o):
+                    first = _text(o["message"]["content"]).strip()
+            size = fh.seek(0, 2)
+            fh.seek(max(0, size - 512 * 1024))
+            for line in fh.read().splitlines():
+                if b'-title"' not in line and b'"last-prompt"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                t = o.get("type")
+                if t == "custom-title":
+                    title = o.get("customTitle") or o.get("title") or title
+                elif t == "ai-title":
+                    ai_title = o.get("aiTitle") or ai_title
+                elif t == "last-prompt":
+                    last = o.get("lastPrompt") or last
+    except OSError:
+        return None
+    if not cwd or not (first or last):
+        return None
+    return {
+        "id": os.path.basename(path)[:-6], "cwd": cwd, "branch": branch, "mtime": mtime,
+        "title": title or ai_title or "", "first": (first or "")[:1000], "last": (last or "")[:1000],
+    }
+
+
+def scan(limit):
+    files = []
+    for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+        try:
+            files.append((os.path.getmtime(f), f))
+        except OSError:
+            pass
+    files.sort(reverse=True)
+    out = [s for s in (parse(f) for _, f in files[:limit]) if s]
+    return {"home": os.path.expanduser("~"), "sessions": out}
+
+
+# ---------- local side ----------
+
+def load_hosts(args):
+    if args:
+        return args
+    if os.environ.get("CCR_HOSTS"):
+        return os.environ["CCR_HOSTS"].split()
+    p = os.path.expanduser("~/.config/ccr/hosts")
+    if os.path.exists(p):
+        with open(p) as f:
+            return [l.split("#")[0].strip() for l in f if l.split("#")[0].strip()]
+    return []
+
+
+def scan_remote(host):
+    with open(os.path.abspath(__file__), "rb") as f:
+        src = f.read()
+    r = subprocess.run(["ssh", *SSH_OPTS, host, "python3", "-", "--scan", str(LIMIT)],
+                       input=src, capture_output=True, timeout=60)
+    if r.returncode != 0:
+        err = r.stderr.decode(errors="replace").strip().splitlines()
+        raise RuntimeError(err[-1] if err else f"exit {r.returncode}")
+    return json.loads(r.stdout)
+
+
+def age(ts):
+    d = time.time() - ts
+    for unit, sec in (("d", 86400), ("h", 3600), ("m", 60)):
+        if d >= sec:
+            return f"{int(d // sec)}{unit}"
+    return "now"
+
+
+def oneline(s, n):
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def preview(path):
+    with open(path) as f:
+        s = json.load(f)
+    print(f"host   : {s['host']}")
+    print(f"cwd    : {s['cwd']}")
+    print(f"branch : {s.get('branch') or '-'}")
+    print(f"id     : {s['id']}")
+    print(f"updated: {time.strftime('%Y-%m-%d %H:%M', time.localtime(s['mtime']))} ({age(s['mtime'])} ago)")
+    if s["title"]:
+        print(f"title  : {s['title']}")
+    print("\n── first prompt ──\n" + s["first"])
+    if s["last"] and s["last"] != s["first"]:
+        print("\n── last prompt ──\n" + s["last"])
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv[:1] == ["--scan"]:
+        json.dump(scan(int(argv[1]) if len(argv) > 1 else LIMIT), sys.stdout, ensure_ascii=False)
+        return
+    if argv[:1] == ["--preview"]:
+        return preview(argv[1])
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return
+
+    extra = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, extra = argv[:i], argv[i + 1:]
+    use_tmux = "--tmux" in argv
+    no_local = "--no-local" in argv
+    hosts = load_hosts([a for a in argv if not a.startswith("--")])
+
+    sessions, errors = [], []
+    if not no_local:
+        for s in scan(LIMIT)["sessions"]:
+            sessions.append({**s, "host": "local", "home": os.path.expanduser("~")})
+    if hosts:
+        print(f"scanning {', '.join(hosts)} ...", file=sys.stderr)
+        with cf.ThreadPoolExecutor(len(hosts)) as ex:
+            futs = {ex.submit(scan_remote, h): h for h in hosts}
+            for fut in cf.as_completed(futs):
+                h = futs[fut]
+                try:
+                    res = fut.result()
+                    sessions += [{**s, "host": h, "home": res["home"]} for s in res["sessions"]]
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"! {h}: {e}")
+                    print(f"  ! {h}: {e}", file=sys.stderr)
+    if not sessions:
+        sys.exit("セッションが見つかりません")
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+
+    tmp = tempfile.mkdtemp(prefix="ccr-")
+    hw = max(len(s["host"]) for s in sessions)
+    lines = []
+    for i, s in enumerate(sessions):
+        p = os.path.join(tmp, f"{i}.json")
+        with open(p, "w") as f:
+            json.dump(s, f, ensure_ascii=False)
+        proj = s["cwd"].replace(s["home"], "~", 1)
+        label = s["title"] or s["last"] or s["first"]
+        lines.append(f"{p}\t{s['host']:<{hw}}  {age(s['mtime']):>4}  {oneline(proj, 40):<40}  {oneline(label, 90)}")
+
+    me = shlex.quote(os.path.abspath(__file__))
+    r = subprocess.run(
+        ["fzf", "--delimiter", "\t", "--with-nth", "2", "--no-sort", "--layout", "reverse",
+         "--prompt", "resume> ", "--header", "\n".join(["host  age  project  title", *errors]),
+         "--preview", f"{shlex.quote(sys.executable)} {me} --preview {{1}}",
+         "--preview-window", "down,40%,wrap"],
+        input="\n".join(lines), capture_output=False, stdout=subprocess.PIPE, text=True)
+    try:
+        if r.returncode != 0 or not r.stdout.strip():
+            return
+        with open(r.stdout.split("\t", 1)[0]) as f:
+            s = json.load(f)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    claude = "claude -r " + " ".join(shlex.quote(a) for a in [s["id"], *extra])
+    inner = f"cd {shlex.quote(s['cwd'])} && exec {claude}"
+    if s["host"] == "local":
+        os.chdir(s["cwd"])
+        os.execvp("claude", ["claude", "-r", s["id"], *extra])
+    if use_tmux:
+        inner = (f"tmux new-session -A -s ccr-{s['id'][:8]} "
+                 + shlex.quote(f'exec "${{SHELL:-/bin/sh}}" -lic {shlex.quote(inner)}'))
+    # login + interactive shell で PATH(~/.local/bin 等)を読ませる
+    remote = f'exec "${{SHELL:-/bin/sh}}" -lic {shlex.quote(inner)}'
+    print(f"→ ssh {s['host']}: {inner}", file=sys.stderr)
+    os.execvp("ssh", ["ssh", "-t", s["host"], remote])
+
+
+if __name__ == "__main__":
+    main()
