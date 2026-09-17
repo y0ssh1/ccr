@@ -1,8 +1,10 @@
 # ccr
 
-`claude -r` をローカルと ssh 先の複数マシンに広げた CLI です。
+Claude Code のセッションを、ローカルと ssh 先の複数マシンにまたがって扱う CLI です。
 
-全マシンにある Claude Code のセッションを fzf の一覧にまとめて表示します。1つ選ぶと、そのセッションがあるマシンの、そのセッションを作ったディレクトリで `claude -r <session-id>` を実行します。リモートのセッションなら、ssh で自動的にログインしてから実行します。
+- **`ccr`**: 全マシンのセッションを fzf の一覧で選び、そのマシン・そのディレクトリで `claude -r <id>` を実行します。
+- **`ccn`**（= `ccr new`）: ホストとディレクトリを選んで、新しいセッションを開始します。
+- リモートでは既定で **tmux の中で起動**します。ssh が切れても claude は動き続け、同じセッションを選び直すと再接続します。
 
 ```
 resume>
@@ -15,167 +17,219 @@ resume>
 │ cwd    : /home/me/src/api                                                │
 │ branch : feature/rails8                                                  │
 │ id     : 227ea544-f19f-4d09-b9cf-fe80b70fb315                            │
-│ ── first prompt ──                                                       │
-│ ...                                                                      │
+│ ── first prompt ──  ...                                                  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-- 実体は Python 標準ライブラリだけで書いた 1 ファイル（`ccr`）です。pip で入れるパッケージは不要です。
-- リモート側へのインストールは不要です。一覧を取るたびに、ssh 経由でスクリプト自身を送り込んで実行します。
+- 本体は Python 標準ライブラリだけで書いた 1 ファイル（`ccr`）です。`ccn` はそのシンボリックリンクです。
+- リモート側へのインストールは不要です。一覧取得のたびに、ssh 経由でスクリプト自身を送り込んで実行します。
+
+> **AI エージェント向け:** セットアップやトラブル対応は [`skills/ccr/SKILL.md`](skills/ccr/SKILL.md) の手順に従ってください。`install.sh` を実行すると、この skill が `~/.claude/skills/ccr/` に配置されます。
+
+---
+
+## クイックスタート
+
+```sh
+# 1. インストール（依存確認 → ccr/ccn 配置 → skill 配置 → ホスト登録 → doctor）
+curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh | sh -s -- --host devbox
+
+# 2. doctor の [fail] を fix: の指示どおりに直す（なくなるまで繰り返す）
+ccr doctor
+
+# 3. 使う
+ccr          # 既存のセッションを再開
+ccn          # 新しいセッションを開始
+```
+
+`devbox` の部分は、`~/.ssh/config` に定義した Host エイリアスに置き換えてください。ssh の設定方法は[リモートホストの追加](#リモートホストの追加)を参照してください。
 
 ---
 
 ## 必要なもの
 
-| 場所 | 必要なもの | 確認コマンド |
+| 場所 | 必要なもの | 確認方法 |
 |---|---|---|
-| ローカル | `python3` (3.8+), `fzf`, `ssh`, `claude` | `which python3 fzf ssh claude` |
-| 各リモート | `python3` (3.8+), `claude` がログインシェルの PATH にあること | `ssh <host> '$SHELL -lic "which python3 claude"'` |
-| 各リモート | **パスワードを聞かれずに** ssh できること（鍵認証） | `ssh -o BatchMode=yes <host> true && echo ok` |
-| 各リモート（任意） | `tmux`（`--tmux` を使う場合） | `ssh <host> 'which tmux'` |
+| ローカル | `python3` 3.8+、`fzf`、`ssh`、`claude` | `ccr doctor` |
+| 各リモート | **パスワードを聞かれずに**ssh できること（鍵認証） | `ccr doctor <host>` |
+| 各リモート | `python3` 3.6+、`claude` がログインシェルの PATH にあること | `ccr doctor <host>` |
+| 各リモート（推奨） | `tmux`。ないと、ssh が切れたときに claude も終了する | `ccr doctor <host>` |
 
-macOS の注意点: 標準の `/usr/bin/python3` は、Command Line Tools（`xcode-select --install`）を入れるまで使えません。
+`ccr doctor` は問題を見つけると終了コード 1 を返し、項目ごとに `fix:` として直し方を表示します。
 
 ---
 
-## セットアップ手順
-
-AI エージェントに実行させる場合も、この順番で進めてください。各ステップの「確認」が通ってから次へ進みます。
-
-### 1. インストール
+## インストール
 
 ```sh
-mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/ccr -o ~/.local/bin/ccr
-chmod +x ~/.local/bin/ccr
+curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh | sh
+# ホスト登録も同時に行う場合
+curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh | sh -s -- --host devbox --host gpu1
+# clone して使う場合（ccr と skill は clone 内のファイルへのシンボリックリンクになり、git pull で更新される）
+git clone https://github.com/y0ssh1/ccr ~/src/ccr && ~/src/ccr/install.sh
 ```
 
-確認: `ccr --help` の出力が表示されること。`~/.local/bin` が PATH に入っていない場合は、シェルの設定ファイルに追加します。
+`install.sh` は冪等で、次の処理を行います。
 
-### 2. ssh の接続設定（リモート 1 台ごと）
+1. `python3` (3.8+) を確認します。`fzf` がなければ、`brew`、または sudo 不要な `apt-get` で導入を試みます。
+2. `ccr` と `ccn` を `~/.local/bin` に配置します（`--bin <dir>` または `CCR_BIN` で変更可能）。
+3. Claude Code 用の skill を `~/.claude/skills/ccr/SKILL.md` に配置します（`--no-skill` で省略）。
+4. `--host` で指定したホストを `~/.config/ccr/hosts` に追記します。登録済みのホストは重複して追記しません。
+5. `ccr doctor` を実行します。
 
-`~/.ssh/config` にホストのエイリアスを定義します。ccr はこのエイリアス名でホストを参照します。
+パスワード入力や sudo が必要な操作は実行しません。実行すべきコマンドを表示します。
 
-```sshconfig
-Host devbox
-  HostName devbox.example.ts.net   # Tailscale の MagicDNS 名や IP でもよい
-  User me                          # リモート側のユーザー名（リモートで `whoami` した結果）
-  IdentityFile ~/.ssh/id_ed25519
-```
+---
 
-鍵がまだリモートに登録されていなければ、**ローカル側で**次を実行します。リモートのログインパスワードを 1 回だけ聞かれます。
+## リモートホストの追加
 
-```sh
-ssh-copy-id -i ~/.ssh/id_ed25519.pub devbox
-```
+1. **ssh エイリアスを定義します。** `~/.ssh/config` に追記します。
 
-- リモートが macOS の場合は、先に「システム設定 → 一般 → 共有 → リモートログイン」をオンにします。
-- Tailscale を使っているなら、`ssh-copy-id` の代わりにリモート側で `tailscale set --ssh` を実行して Tailscale SSH を有効にする方法もあります。
+   ```sshconfig
+   Host devbox
+     HostName devbox.example.ts.net   # Tailscale の MagicDNS 名や IP でもよい
+     User me                          # リモートで `whoami` を実行した結果（ローカルと同じとは限らない）
+     IdentityFile ~/.ssh/id_ed25519
+   ```
 
-確認: `ssh -o BatchMode=yes devbox 'hostname; $SHELL -lic "which python3 claude"'` が、パスワードなしで python3 と claude のパスを表示すること。
+2. **リモートで ssh ログインを受け付けるようにします。** macOS なら「システム設定 → 一般 → 共有 → リモートログイン」をオンにします。
 
-### 3. ホストを登録
+3. **鍵を登録します。** **ローカル側で**実行します。初回は fingerprint の確認（yes）と、リモートのログインパスワードの入力を求められます。
 
-```sh
-mkdir -p ~/.config/ccr
-cat >> ~/.config/ccr/hosts <<'EOF'
-# 1 行 1 ホスト。~/.ssh/config の Host エイリアスを書く。# 以降はコメント
-devbox
-EOF
-```
+   ```sh
+   ssh-copy-id -i ~/.ssh/id_ed25519.pub devbox
+   ```
 
-確認: `ssh -o BatchMode=yes devbox python3 - --scan 5 < ~/.local/bin/ccr` が、`{"home": ..., "sessions": [...]}` という形の JSON を返すこと。
+   Tailscale を使っているなら、代わりにリモートで `tailscale set --ssh` を実行して Tailscale SSH を有効にする方法もあります。
 
-### 4. 実行
+4. **ホストを登録して検査します。**
 
-```sh
-ccr
-```
-
-一覧取得に失敗したホストがあると、fzf のヘッダーに `! <host>: <エラー>` と表示されます。
+   ```sh
+   echo devbox >> ~/.config/ccr/hosts
+   ccr doctor devbox
+   ```
 
 ---
 
 ## 使い方
 
+### セッションを再開する（`ccr`）
+
 ```sh
-ccr                                      # ローカル + 登録済みの全ホスト
-ccr devbox gpu1                          # 指定したホストのみ（hosts ファイルより優先）。ローカルも含む
-ccr --no-local                           # リモートのみ
-ccr --tmux                               # リモートでは tmux セッション内で resume する
-ccr -- --dangerously-skip-permissions    # `--` より後ろはそのまま `claude -r <id>` に渡す
+ccr                                   # ローカル + 登録済みの全ホスト
+ccr devbox gpu1                       # 指定ホスト + ローカル（hosts ファイルより優先）
+ccr --no-local                        # リモートのみ
+ccr --id 227ea544                     # ID の前方一致で直接 resume（fzf を使わない）
+ccr -- --dangerously-skip-permissions # `--` 以降は claude にそのまま渡す
 ```
 
-fzf 上の操作は通常の fzf と同じです。文字を入力して絞り込み、Enter で resume、Esc で終了します。検索対象は host / project / title の列です。
+fzf の操作: 文字を入力して絞り込み（host / project / title が対象）、Enter で resume、Esc で終了します。
+
+### 新しいセッションを開始する（`ccn` / `ccr new`）
+
+```sh
+ccn                      # ホスト×ディレクトリの一覧から選ぶ
+ccn devbox               # devbox のディレクトリから選ぶ
+ccn devbox:~/src/api     # 直接開始
+ccn devbox:              # devbox の home で開始
+ccn ~/work/foo           # ローカルで直接開始（ccn . ならカレントディレクトリ）
+ccn devbox:~/src/api -- --model opus
+```
+
+一覧に出る候補は、各ホストの home と、過去のセッションで使ったディレクトリです。一覧にないディレクトリを使いたいときは、`devbox:/path/to/dir`（ローカルなら `/path` か `~/path`）と入力して Enter を押すと、そのまま使えます。
+
+### 非対話コマンド（スクリプト・エージェント向け）
+
+```sh
+ccr ls [host...]            # TSV: host  age  id  cwd  title
+ccr ls --json               # {"sessions": [...], "errors": [...]}
+ccr doctor [host...]        # 依存関係を検査（問題があれば exit 1）
+ccr doctor --json           # [{"host","status":"ok|warn|fail","item","detail","fix"}]
+ccn devbox:~/x -n           # -n / --dry-run: 実行されるコマンドを表示するだけ
+```
 
 ### オプション
 
 | オプション | 説明 |
 |---|---|
-| `<host>...` | 対象ホストを指定する。指定すると `$CCR_HOSTS` と hosts ファイルは無視される |
-| `--no-local` | ローカルのセッションを一覧に出さない |
-| `--tmux` | リモートで `tmux new-session -A -s ccr-<id先頭8文字>` の中で起動する。回線が切れてもセッションが残り、同じセッションを選ぶと再接続する |
-| `-- <args>` | 以降の引数を `claude -r <id>` に追加する |
-| `-h`, `--help` | ヘルプを表示する |
+| `<host>...` | 対象ホスト。指定すると `$CCR_HOSTS` と hosts ファイルは無視される。`local` はこのマシン |
+| `--no-local` | ローカルを対象から外す |
+| `--no-tmux` | リモートで tmux を使わず、直接起動する |
+| `--id <prefix>` | セッション ID の前方一致で、fzf を使わずに resume する |
+| `-n`, `--dry-run` | 起動せず、実行するコマンドを表示する |
+| `--json` | `ls` / `doctor` の出力を JSON にする |
+| `-- <args>` | 以降の引数を `claude` に渡す |
 
 ### 設定
 
 | 項目 | 既定値 | 説明 |
 |---|---|---|
-| `~/.config/ccr/hosts` | なし | 対象ホストの一覧。1 行 1 ホスト、`#` 以降はコメント |
-| `CCR_HOSTS` | なし | 空白区切りのホスト一覧。設定すると hosts ファイルより優先される |
-| `CCR_LIMIT` | `300` | 1 ホストあたりに読むセッション数（更新日時の新しい順） |
+| `~/.config/ccr/hosts` | なし | 1 行 1 ホスト。`#` 以降はコメント |
+| `CCR_HOSTS` | なし | 空白区切りのホスト一覧。hosts ファイルより優先される |
+| `CCR_LIMIT` | `300` | 1 ホストあたりに読むセッション数（新しい順） |
 
 ホスト指定の優先順位: コマンドライン引数 > `CCR_HOSTS` > `~/.config/ccr/hosts`
+
+### tmux の挙動
+
+- リモートでの起動コマンドは `tmux new-session -A -s <name>` です。`-A` により、同名のセッションがあれば新しく作らずにそこへ接続します。
+  - resume 時のセッション名: `ccr-<セッションID先頭8文字>`
+  - 新規開始時のセッション名: `ccn-<host>-<HHMMSS>`
+- ssh が切れても claude は動き続けます。`ccr` で同じセッションを選ぶと再接続します。
+- tmux から抜けるときは、`Ctrl-b d` で detach します（claude は動いたまま）。
+- リモートに tmux がない場合は、警告を出して直接起動します。この場合、ssh が切れると claude も終了します。
+- ローカルでは tmux を使いません。
 
 ---
 
 ## 仕組み
 
 1. **一覧の取得（scan）**
-   - ローカル: `~/.claude/projects/*/*.jsonl` を更新日時の新しい順に最大 `CCR_LIMIT` 件読みます。
-   - リモート: `ssh -o BatchMode=yes -o ConnectTimeout=5 <host> python3 - --scan <N>` を実行し、標準入力に `ccr` 自身を流し込んで、同じ scan 処理を実行させます。複数ホストは並列に処理します。
+   - ローカル: `~/.claude/projects/*/*.jsonl` を新しい順に最大 `CCR_LIMIT` 件読みます。
+   - リモート: `ssh -o BatchMode=yes -o ConnectTimeout=5 <host> python3 - --scan <N>` を実行し、標準入力に `ccr` 自身を流し込んで同じ処理を実行させます。複数ホストは並列に処理します。
    - 各セッションから取り出す値:
-     - `id`: ファイル名
-     - `cwd`, `gitBranch`: 先頭付近の行から
-     - 最初のユーザープロンプト
-     - 末尾 512KB から `custom-title` / `ai-title` / `last-prompt`
+     - ファイル名: `id`
+     - 先頭付近の行: `cwd` / `gitBranch` / 最初のユーザープロンプト
+     - 末尾 512KB: `custom-title` / `ai-title` / `last-prompt`
 2. **表示**
-   - 全ホスト分を更新日時の新しい順に並べて fzf に渡します。
-   - プレビューは `ccr --preview <tmpfile>` です。一覧取得時にセッション情報を一時ファイルに書いておき、それを表示します。そのため、プレビューのために ssh し直すことはありません。一時ファイルは終了時に削除します。
-3. **resume**
-   - ローカル: `cd <cwd>` してから `exec claude -r <id>` を実行します。
-   - リモート: `ssh -t <host> 'exec "$SHELL" -lic "cd <cwd> && exec claude -r <id>"'` を実行します。ログインシェルかつ対話シェルで起動するのは、`~/.local/bin` など `.zshrc` / `.bash_profile` で追加される PATH を読ませるためです。
+   - 全ホスト分を新しい順に並べて fzf に渡します。
+   - プレビューは、一覧取得時に書き出した一時ファイルを表示するので、ssh し直すことはありません。一時ファイルは終了時に削除します。
+3. **起動**
+   - ローカル: `cd <cwd>` してから `exec claude ...` を実行します。
+   - リモート: `ssh -t <host> 'exec "$SHELL" -lic "…tmux new-session -A -s <name> … cd <cwd> && exec claude …"'` を実行します。ログインシェルかつ対話シェルで起動するのは、`.zshrc` などで追加される PATH（`~/.local/bin` など）を読ませるためです。
+4. **doctor**
+   - リモートのログインシェルで `command -v python3 claude tmux` と `python3` の動作確認を行い、`~/.claude/projects` のファイル数を数えます。
+   - ssh が失敗した場合は、エラー文から原因を分類して直し方を表示します。
 
-### 内部サブコマンド
+内部サブコマンド（ユーザーが直接使うことは想定していません）:
 
-ユーザーが直接使うことは想定していません。
-
-| コマンド | 出力 |
-|---|---|
-| `ccr --scan [N]` | 実行したマシンのセッション一覧を JSON で出力する: `{"home": str, "sessions": [{"id","cwd","branch","mtime","title","first","last"}]}` |
-| `ccr --preview <file>` | 一時ファイルに書いたセッション情報を人間向けに整形して出力する |
+- `ccr --scan [N]`: 実行したマシンのセッション一覧を JSON で出力します。形式は `{"home": str, "sessions": [{"id","cwd","branch","mtime","title","first","last"}]}` です。
+- `ccr --preview <file>`: fzf のプレビュー表示に使います。
 
 ---
 
 ## トラブルシューティング
 
-| 症状 / fzf ヘッダーの表示 | 原因 | 対処 |
+まず `ccr doctor` を実行してください。多くの場合、`fix:` に直し方が表示されます。
+
+| 症状 / 表示 | 原因 | 対処 |
 |---|---|---|
-| `Host key verification failed.` | リモートのホスト鍵がまだ `known_hosts` にない | `ssh <host> true` を一度手動で実行し、`yes` と答える |
-| `Permission denied (publickey,...)` | 鍵認証が設定されていない | ローカル側で `ssh-copy-id -i ~/.ssh/id_ed25519.pub <host>` を実行する |
+| `Host key verification failed.` | ホスト鍵がまだ `known_hosts` にない | `ssh <host> true` を実行して yes と答える |
+| `Permission denied (publickey,...)` | 鍵認証が設定されていない | **ローカルで** `ssh-copy-id -i ~/.ssh/id_ed25519.pub <host>` を実行する |
 | `Password:` を何度も聞かれて失敗する | ユーザー名が違う | リモートで `whoami` を実行し、その値を `~/.ssh/config` の `User` に書く |
-| `python3: command not found` や `xcode-select` 関連 | リモートに python3 がない | macOS なら `xcode-select --install`、Linux ならパッケージマネージャで python3 を入れる |
-| エラーは出ないのにリモートのセッションが出ない | リモートの `~/.claude/projects` にセッションがない | リモートで `ls ~/.claude/projects` を実行して確認する |
-| resume 時に `claude: command not found` | ログインシェルの PATH に claude がない | リモートの `.zshrc` / `.bashrc` で claude のあるディレクトリを PATH に追加する |
-| resume 時に `cd: no such file or directory` | セッションを作ったディレクトリが削除・移動されている | 元のパスにディレクトリを戻す |
+| `Could not resolve` / `timed out` / `refused` | ホストに到達できない、または sshd が停止している | HostName と Tailscale の接続を確認する。macOS ならリモートログインをオンにする |
+| `python3 not found` | リモートに python3 がない | macOS なら `xcode-select --install`、Debian 系なら `sudo apt-get install -y python3` |
+| `claude not found` | ログインシェルの PATH に claude がない | `ssh -t <host> 'curl -fsSL https://claude.ai/install.sh \| bash'` を実行する。導入済みなら PATH の設定を確認する |
+| `ccr: tmux が無いため直接起動します` | リモートに tmux がない | `brew install tmux` または `sudo apt-get install -y tmux` |
+| resume 時に `cd: no such file or directory` | ディレクトリが削除・移動されている | ディレクトリを元の場所に戻す |
 | 一覧が開くまで遅い | ホストごとに毎回 ssh 接続している | `~/.ssh/config` に `ControlMaster auto` / `ControlPath ~/.ssh/cm-%r@%h:%p` / `ControlPersist 10m` を設定する |
-| title が空になる | Claude Code のセッションファイル形式が変わった | 最初のプロンプトが代わりに表示されるので、一覧自体は使える。`parse()` の読み取り処理を修正する |
+| title が空になる | Claude Code のセッションファイル形式が変わった | 最初のプロンプトが代わりに表示されるので、一覧は使える。`parse()` の読み取り処理を修正する |
 
 ---
 
 ## 制約
 
-- Claude Code のセッションファイル（`~/.claude/projects/**.jsonl`）の内部形式に依存しています。公開仕様ではないため、Claude Code の更新で動かなくなる可能性があります。
-- ssh は `BatchMode=yes` で接続するので、パスワード認証やパスフレーズ付きの鍵（ssh-agent 未登録）には対応していません。
+- Claude Code のセッションファイル（`~/.claude/projects/**.jsonl`）の内部形式に依存しています。公開仕様ではありません。
+- ssh は `BatchMode=yes` で接続します。パスワード認証や、ssh-agent に登録していないパスフレーズ付きの鍵には対応していません。
+- ローカルで tmux を使っている場合、リモートの tmux が入れ子になります。prefix キーが衝突するときは、リモートで `Ctrl-b` を 2 回押して送るなどで対応してください。
 - Windows には対応していません。
