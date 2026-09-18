@@ -252,6 +252,7 @@ ccn devbox:~/x -n           # -n / --dry-run: 実行されるコマンドを表�
 | `python3` / `claude` / `tmux` が not found | host のセットアップが済んでいない | `ccr setup <host>`（macOS で python3 がない場合は、host で `xcode-select --install` の GUI 承認が必要） |
 | `claude login 未ログイン` | host の claude が未認証 | `ssh -t <host> claude auth login` |
 | `claude login ssh からはキーチェーンがロックされていて…` | macOS の host では、認証情報がキーチェーンにある。ssh セッションからはキーチェーンがロックされていて読めない | host のターミナルで `curl -fsSL https://raw.githubusercontent.com/y0ssh1/ccr/main/install.sh \| sh -s -- --role host --token` を実行する（`claude setup-token` のブラウザ認証 → 表示されたトークンを貼り付けると `~/.claude/oauth-token` に保存される）。トークンがなくても、起動時に `security unlock-keychain` のパスワードを入力すれば使える |
+| ccr で入ったセッションで `git push` は通るのに `gh` が `HTTP 401` / `token is invalid`（docker などの認証も ssh 越しでだけ落ちる） | macOS の host。ssh から起動した tmux サーバーは Background セッションに属し、その中のプロセスはログインキーチェーンを読めない（`launchctl managername` が `Background`）。claude 自身は長期トークンで動くので気づきにくい | tmux サーバーを GUI ログイン（Aqua）側で常駐させる LaunchAgent を置く。手順・plist・切り替えの注意（今の tmux サーバーを終わらせるまで効かない）は [skills/ccr/SKILL.md](skills/ccr/SKILL.md) の「macOS の host: ssh 越しでも gh / docker などにキーチェーンを使わせる」。Claude Code に「ssh 越しで gh が 401 になる」と言えばこの skill が案内する |
 | `ccr: tmux が無いため直接起動します` | host に tmux がない | `ccr setup <host>` |
 | resume 時に `cd: no such file or directory` | ディレクトリが削除・移動されている | ディレクトリを元の場所に戻す |
 | 一覧が開くまで遅い | ホストごとに毎回 ssh 接続している | `~/.ssh/config` に `ControlMaster auto` / `ControlPath ~/.ssh/cm-%r@%h:%p` / `ControlPersist 10m` を設定する |

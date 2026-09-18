@@ -1,6 +1,6 @@
 ---
 name: ccr
-description: ccr / ccn（ローカルと ssh 先の複数マシンにまたがって Claude Code セッションを resume・新規開始する CLI）のセットアップ、ホスト追加、依存関係の解消、トラブル対応。「リモートのセッションを再開したい」「別マシンで claude を起動したい」「ccr にホストを追加」「ccr が動かない」「ccr doctor」などで使う。
+description: ccr / ccn（ローカルと ssh 先の複数マシンにまたがって Claude Code セッションを resume・新規開始する CLI）のセットアップ、ホスト追加、依存関係の解消、トラブル対応。「リモートのセッションを再開したい」「別マシンで claude を起動したい」「ccr にホストを追加」「ccr が動かない」「ccr doctor」などで使う。ssh 越しのセッションで gh が 401 / token is invalid になる、macOS のキーチェーンが読めない、docker などの認証が ssh でだけ落ちる、といった症状の切り分けと直し方（tmux サーバーを GUI ログイン側で常駐させる）もここ。
 ---
 
 # ccr / ccn
@@ -68,6 +68,78 @@ description: ccr / ccn（ローカルと ssh 先の複数マシンにまたが�
 3. 完了したら、ユーザーに次のコマンドを案内する。
    - `ccr`: 既存のセッションを選んで再開する
    - `ccn`: 新しいセッションを開始する。行き先が決まっているなら `ccn <alias>:~/path`
+
+## macOS の host: ssh 越しでも gh / docker などにキーチェーンを使わせる
+
+**症状**: ccr で入ったセッションで、`git push`（ssh 鍵）は通るのに `gh` が `HTTP 401` / `The token in default is invalid` になる。docker の credential helper など、キーチェーンに認証情報を置く CLI が同じ形で落ちる。**トークンの失効ではない。**
+
+**原因**: ssh から起動した tmux サーバーは macOS の **Background セッション**に属し、その中のプロセスはログインキーチェーンを読めない（読めるのは GUI ログイン側＝**Aqua セッション**のプロセスだけ）。ccr は既定ソケットの tmux に `new-session -A` で入るので、**tmux サーバーが先に Aqua 側で立っていれば**、ssh 越しに開いたセッションも Aqua に属し、claude とその下の CLI が全部キーチェーンを使える。パスワードはどこにも保存しない。
+
+claude 自身の認証は別の仕組み（`--token` の長期トークン / 起動時の `security unlock-keychain`）で動いているので、**claude が動いていてもこの問題は残る**。
+
+### 切り分け（エージェントが実行してよい。読み取りだけ）
+
+```sh
+echo "${SSH_CONNECTION:-(ssh ではない)}"
+launchctl managername                     # Aqua なら読める側 / Background なら読めない側
+security show-keychain-info 2>&1 | head -1 # 「User interaction is not allowed」なら読めていない
+launchctl print gui/$(id -u) >/dev/null 2>&1 && echo "GUI ログインあり" || echo "GUI ログインなし"
+grep -c oauth_token ~/.config/gh/hosts.yml # 0 なら gh のトークンはキーチェーンにある
+```
+
+`managername` が `Background` で、GUI ログインがあるなら、下の手順で直る。
+
+### 直し方: tmux サーバーを Aqua 側で常駐させる LaunchAgent
+
+**エージェントは設置しない。** 常駐設定の追加は権限チェックで拒否される（拒否されなくても、ユーザーのマシンに常駐物を置く判断はユーザーのもの）。plist をユーザーに見せ、設置のコマンドを渡す。
+
+1. `tmux` の絶対パスを確認する（`command -v tmux`。Apple Silicon の brew は `/opt/homebrew/bin/tmux`、Intel は `/usr/local/bin/tmux`）。**launchd は PATH を読まないので絶対パスで書く。**
+2. 次の内容を `~/Library/LaunchAgents/io.github.y0ssh1.ccr.tmux-aqua.plist` に置いてもらう（`<tmux>` を 1 の値に置き換える）。
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key><string>io.github.y0ssh1.ccr.tmux-aqua</string>
+     <key>LimitLoadToSessionType</key><string>Aqua</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/bin/sh</string><string>-c</string>
+       <string><tmux> list-sessions >/dev/null 2>&amp;1 || <tmux> new-session -d -s keychain-host</string>
+     </array>
+     <key>RunAtLoad</key><true/>
+     <key>StartInterval</key><integer>30</integer>
+     <key>AbandonProcessGroup</key><true/>
+   </dict>
+   </plist>
+   ```
+
+   - tmux サーバーが 1 つも無いときだけ、番人セッション `keychain-host` を作る（＝サーバーを Aqua 側で起こす）。既にサーバーがあれば何もしない
+   - `AbandonProcessGroup` が無いと、tmux がデーモン化した後に launchd がサーバーごと片付ける
+   - `LimitLoadToSessionType=Aqua` なので、GUI ログインしていないと動かない
+3. 読み込んでもらう（ユーザーが実行）: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.y0ssh1.ccr.tmux-aqua.plist`
+   - エラーが出なければ成功。`Bootstrap failed: 5` は多くの場合「既に読み込み済み」か「GUI ログインが無い」
+
+### ⚠ 効き始めるのは、今の tmux サーバーが終わってから
+
+既に ssh 起動（Background）の tmux サーバーが動いていると、LaunchAgent は「サーバーあり」で何もしない。**切り替えには今のサーバーを終わらせる必要があり、そのサーバーの中の claude セッションは全部落ちる**（会話は `ccr` で resume できる）。
+
+- **エージェントは `tmux kill-server` を実行しない。** 自分が動いているセッションごと落ちる。ユーザーに「いつ切り替えるか」を選んでもらう
+  - 急がない: 開いている ccr セッションを全部閉じ終えたら、30 秒以内に Aqua 側で立つ
+  - すぐ: ユーザーが `tmux kill-server` → 30 秒待って ccr で入り直す
+- 確認: 入り直したセッションで `launchctl managername` が `Aqua`、`gh auth status` が通る
+
+### それでも読めないとき
+
+| 状況 | 対処 | 誰が |
+|---|---|---|
+| Mac に GUI ログインしていない（再起動直後など） | Aqua セッションが無いので効かない。画面でログインする（自動ログインの設定はユーザーの判断） | ユーザー |
+| 初めてその項目に触るバイナリ / アップデートで署名が変わった CLI | Mac の**画面に**許可ダイアログが出て止まる。画面（または画面共有）で「常に許可」を 1 回押す | ユーザー |
+| Aqua 側に切り替えられない事情がある（常駐物を置けない・GUI ログインできない） | CLI ごとにキーチェーンを使わない設定へ。gh なら `gh auth login -h github.com -p ssh --web --insecure-storage`（トークンを `~/.config/gh/hosts.yml` に平文 600 で保存）か、fine-grained PAT を `GH_TOKEN` に | ユーザー（トークンを平文で置く判断を含む） |
+| そのセッションだけ今すぐ通したい | `security unlock-keychain`（ログインパスワードを聞かれる。そのセッション限り）。`-p` でパスワードを渡さない（履歴に残る） | ユーザー |
+
+外すとき（ユーザーが実行）: `launchctl bootout gui/$(id -u)/io.github.y0ssh1.ccr.tmux-aqua && rm ~/Library/LaunchAgents/io.github.y0ssh1.ccr.tmux-aqua.plist`
 
 ## コマンド早見表
 

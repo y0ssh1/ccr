@@ -460,6 +460,8 @@ PROBE = ('for c in python3 claude tmux; do printf "ccr:%s=%s\\n" "$c" "$(command
          'printf "ccr:pyok=%s\\n" "$(python3 -c \'import sys;print(int(sys.version_info>=(3,6)))\' 2>/dev/null)"; '
          'printf "ccr:auth=%s\\n" "$(claude auth status 2>/dev/null | grep -c \'"loggedIn": *true\')"; '
          'printf "ccr:kclocked=%s\\n" "$([ "$(uname -s)" = Darwin ] && ! security show-keychain-info >/dev/null 2>&1 && echo 1)"; '
+         # tmux サーバーを GUI ログイン側で常駐させる LaunchAgent（skill の「macOS の host」節）が置かれているか
+         'printf "ccr:kcagent=%s\\n" "$(ls ~/Library/LaunchAgents/*tmux-aqua*.plist 2>/dev/null | wc -l | tr -d \' \')"; '
          'printf "ccr:sessions=%s\\n" "$(ls ~/.claude/projects/*/*.jsonl 2>/dev/null | wc -l | tr -d \' \')"')
 
 CLAUDE_INSTALL = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -517,6 +519,14 @@ def check_remote(h):
         add("ok", "tmux", kv["tmux"])
     else:
         add("warn", "tmux", "not found（ssh が切れると claude も終了する）", f"ccr setup {h}")
+    # macOS: ssh 起動の tmux サーバーの中では gh / docker などがキーチェーンを読めない（claude は長期トークンで動くので気づきにくい）
+    if kv.get("kclocked") == "1" and kv.get("tmux"):
+        if kv.get("kcagent", "0") != "0":
+            add("ok", "keychain (tmux)", "LaunchAgent あり。tmux の中で launchctl managername が Aqua なら gh などもキーチェーンを使える")
+        else:
+            add("warn", "keychain (tmux)", "ssh 越しのセッションでは gh / docker などがキーチェーンを読めない（gh が 401 になる）",
+                "skill の「macOS の host: ssh 越しでも gh / docker などにキーチェーンを使わせる」の手順で LaunchAgent を置く"
+                "   # 設置はユーザーが実行")
     add("ok", "sessions", f"{kv.get('sessions', '?')} files in ~/.claude/projects")
     return res
 
